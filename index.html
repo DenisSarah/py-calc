@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Python Calculator (Pyodide)</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background: #0b0f19; color: #e6e8ee; }
+    .wrap { max-width: 520px; margin: 48px auto; padding: 0 16px; }
+    .card { background: #121a2b; border: 1px solid #233050; border-radius: 16px; padding: 16px; box-shadow: 0 10px 30px rgba(0,0,0,.35); }
+    h1 { font-size: 18px; margin: 0 0 12px; color: #eaf0ff; font-weight: 650; letter-spacing: .2px; }
+    .hint { font-size: 13px; opacity: .85; margin: 0 0 12px; line-height: 1.35; }
+    .row { display: grid; grid-template-columns: 1fr; gap: 10px; }
+    .display {
+      background: #0b1222; border: 1px solid #233050; border-radius: 12px;
+      padding: 12px; display: grid; gap: 6px;
+    }
+    input {
+      width: 100%; box-sizing: border-box;
+      background: transparent; color: #eaf0ff; border: 0; outline: none;
+      font-size: 22px; padding: 0; margin: 0;
+    }
+    .result { font-size: 14px; opacity: .9; min-height: 18px; }
+    .status { font-size: 12px; opacity: .75; min-height: 16px; }
+    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 12px; }
+    button {
+      border: 1px solid #233050; background: #0b1222; color: #eaf0ff;
+      border-radius: 12px; padding: 14px 10px; font-size: 16px;
+      cursor: pointer; user-select: none;
+      transition: transform .03s ease, background .12s ease, border-color .12s ease;
+    }
+    button:active { transform: translateY(1px); }
+    button:hover { border-color: #2f4172; }
+    .op { background: #101a33; }
+    .eq { background: #1a2a55; border-color: #3957a3; font-weight: 650; }
+    .danger { background: #2b1520; border-color: #7a2c49; }
+    .wide { grid-column: span 2; }
+    .footer { margin-top: 10px; font-size: 12px; opacity: .75; line-height: 1.35; }
+    code { background: rgba(255,255,255,.06); padding: 2px 6px; border-radius: 8px; }
+  </style>
+
+  <!-- Pyodide loader -->
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.29.1/full/pyodide.js"></script>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Калькулятор на Python (в браузере через Pyodide)</h1>
+      <p class="hint">
+        Поддержка: <code>+ - * /</code>, скобки <code>( )</code>, десятичные числа.
+        Можно вводить с клавиатуры: Enter = посчитать.
+      </p>
+
+      <div class="row">
+        <div class="display">
+          <input id="expr" placeholder="Например: (2+3)*4/5" autocomplete="off" />
+          <div class="result" id="result"></div>
+          <div class="status" id="status">Инициализация Python…</div>
+        </div>
+
+        <div class="grid" id="buttons">
+          <button class="danger" data-action="clear">C</button>
+          <button class="op" data-action="back">⌫</button>
+          <button class="op" data-insert="(">(</button>
+          <button class="op" data-insert=")">)</button>
+
+          <button data-insert="7">7</button>
+          <button data-insert="8">8</button>
+          <button data-insert="9">9</button>
+          <button class="op" data-insert="/">/</button>
+
+          <button data-insert="4">4</button>
+          <button data-insert="5">5</button>
+          <button data-insert="6">6</button>
+          <button class="op" data-insert="*">*</button>
+
+          <button data-insert="1">1</button>
+          <button data-insert="2">2</button>
+          <button data-insert="3">3</button>
+          <button class="op" data-insert="-">-</button>
+
+          <button class="wide" data-insert="0">0</button>
+          <button data-insert=".">.</button>
+          <button class="op" data-insert="+">+</button>
+
+          <button class="eq wide" data-action="eval">=</button>
+          <button class="op wide" data-action="copy">Скопировать ответ</button>
+        </div>
+
+        <div class="footer">
+          Технически это статический сайт: GitHub Pages не запускает серверный Python.
+          Поэтому Python работает прямо в браузере (WebAssembly). :contentReference[oaicite:3]{index=3}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const exprEl = document.getElementById("expr");
+    const resultEl = document.getElementById("result");
+    const statusEl = document.getElementById("status");
+    const buttonsEl = document.getElementById("buttons");
+
+    let pyodide = null;
+    let calcProxy = null; // Python-функция calc(expr)
+
+    function setStatus(text) { statusEl.textContent = text; }
+    function setResult(text, isError=false) {
+      resultEl.textContent = text;
+      resultEl.style.color = isError ? "#ff9bb3" : "#e6e8ee";
+    }
+
+    function insertText(t) {
+      const start = exprEl.selectionStart ?? exprEl.value.length;
+      const end = exprEl.selectionEnd ?? exprEl.value.length;
+      const v = exprEl.value;
+      exprEl.value = v.slice(0, start) + t + v.slice(end);
+      const pos = start + t.length;
+      exprEl.setSelectionRange(pos, pos);
+      exprEl.focus();
+    }
+
+    function backspace() {
+      const start = exprEl.selectionStart ?? exprEl.value.length;
+      const end = exprEl.selectionEnd ?? exprEl.value.length;
+
+      if (start !== end) {
+        const v = exprEl.value;
+        exprEl.value = v.slice(0, start) + v.slice(end);
+        exprEl.setSelectionRange(start, start);
+        return;
+      }
+      if (start <= 0) return;
+      const v = exprEl.value;
+      exprEl.value = v.slice(0, start - 1) + v.slice(start);
+      exprEl.setSelectionRange(start - 1, start - 1);
+      exprEl.focus();
+    }
+
+    function clearAll() {
+      exprEl.value = "";
+      setResult("");
+      exprEl.focus();
+    }
+
+    async function ensurePyodide() {
+      if (pyodide && calcProxy) return;
+
+      setStatus("Загружаю Python (Pyodide)…");
+      // indexURL соответствует рекомендованному пути с CDN :contentReference[oaicite:4]{index=4}
+      pyodide = await loadPyodide({ indexURL: "https://cdn.jsdelivr.net/pyodide/v0.29.1/full/" });
+
+      // Определяем безопасный калькулятор на Python:
+      // - разрешаем только цифры, пробелы, (), . и операции + - * /
+      // - парсим через AST и разрешаем только нужные узлы
+      pyodide.runPython(`
+import ast
+import operator as _op
+import re
+
+_ALLOWED_BINOPS = {
+    ast.Add: _op.add,
+    ast.Sub: _op.sub,
+    ast.Mult: _op.mul,
+    ast.Div: _op.truediv,
+}
+_ALLOWED_UNARYOPS = {
+    ast.UAdd: _op.pos,
+    ast.USub: _op.neg,
+}
+
+def calc(expr: str):
+    expr = (expr or "").strip()
+    if not expr:
+        return ""
+
+    if not re.fullmatch(r"[0-9+\\-*/().\\s]+", expr):
+        raise ValueError("Разрешены только цифры, пробелы, (), ., и + - * /")
+
+    node = ast.parse(expr, mode="eval")
+
+    def _eval(n):
+        if isinstance(n, ast.Expression):
+            return _eval(n.body)
+
+        # числа
+        if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)):
+            return n.value
+        if isinstance(n, ast.Num):  # совместимость
+            return n.n
+
+        # бинарные операции
+        if isinstance(n, ast.BinOp) and type(n.op) in _ALLOWED_BINOPS:
+            return _ALLOWED_BINOPS[type(n.op)](_eval(n.left), _eval(n.right))
+
+        # унарные + и -
+        if isinstance(n, ast.UnaryOp) and type(n.op) in _ALLOWED_UNARYOPS:
+            return _ALLOWED_UNARYOPS[type(n.op)](_eval(n.operand))
+
+        raise ValueError("Недопустимое выражение")
+
+    res = _eval(node)
+
+    # косметика: 2.0 -> 2
+    if isinstance(res, float) and res.is_integer():
+        return int(res)
+    return res
+      `);
+
+      calcProxy = pyodide.globals.get("calc"); // PyProxy
+      setStatus("Готово. Вводи выражение и жми Enter или =");
+    }
+
+    async function evaluateExpr() {
+      try {
+        await ensurePyodide();
+
+        const expr = exprEl.value;
+        if (!expr.trim()) { setResult(""); return; }
+
+        const value = calcProxy(expr);
+        setResult(String(value), false);
+      } catch (err) {
+        setResult(String(err?.message || err), true);
+      }
+    }
+
+    async function copyResult() {
+      const text = resultEl.textContent.trim();
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        setStatus("Скопировано в буфер обмена");
+      } catch {
+        setStatus("Не удалось скопировать (браузер запретил доступ к буферу)");
+      }
+    }
+
+    // Кнопки
+    buttonsEl.addEventListener("click", (e) => {
+      const btn = e.target.closest("button");
+      if (!btn) return;
+
+      const ins = btn.getAttribute("data-insert");
+      const action = btn.getAttribute("data-action");
+
+      if (ins !== null) {
+        insertText(ins);
+        return;
+      }
+      if (action === "clear") clearAll();
+      else if (action === "back") backspace();
+      else if (action === "eval") evaluateExpr();
+      else if (action === "copy") copyResult();
+    });
+
+    // Клавиатура: Enter = посчитать
+    exprEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        evaluateExpr();
+      }
+    });
+
+    // Старт: подгрузим Pyodide заранее (можно убрать, если хочешь грузить только при первом "=")
+    ensurePyodide();
+
+    // Чистка PyProxy при уходе (не обязательно, но аккуратно)
+    window.addEventListener("beforeunload", () => {
+      try { calcProxy?.destroy?.(); } catch {}
+    });
+  </script>
+</body>
+</html>
